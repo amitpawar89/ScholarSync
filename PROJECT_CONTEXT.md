@@ -82,3 +82,14 @@ Do not generate the entire project at once. Work only on the specific phase or f
 - Keep the final paper free of all review markings.
 - Prefer small, incremental changes that match the current development phase.
 - Do not implement later pipeline phases unless explicitly requested.
+
+## Current Status (Updated)
+
+- The project now has a working FastAPI backend under backend/ with these endpoints: /health, /extract-text, /structured-facts (Gemini-powered fact extraction with block-level evidence verification), and /generate-paper (budget-aware section drafting from verified facts).
+- Facts are extracted with strict verification: every fact's claim and evidence must be a substring match against the original PDF's text blocks (page_number + block_number), otherwise it is marked unverified and excluded.
+- The POST /generate-paper endpoint is built and wired into main.py, integrating section_planner.py and paper_sections.py to produce draft_requires_review sections with budget protection.
+- Rate limiting: this project uses the Gemini free tier only. gemini.py enforces a daily request budget (default 5/day, configurable via SCHOLARSYNC_GEMINI_DAILY_REQUEST_LIMIT), serializes requests with a lock, and only retries transient 429/503 errors (max 3 attempts, exponential backoff). Never increase concurrency or remove this rate limiting without being asked.
+- Tests in tests/test_backend.py mock Gemini and must keep passing; never call the real Gemini API in tests.
+- Do not delete or restructure files without explaining what changed and why.
+- I am a student with limited coding experience. Always explain what you changed and why, in simple terms, before or after making edits.
+

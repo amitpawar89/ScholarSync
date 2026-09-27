@@ -69,3 +69,6 @@ class PaperGenerationResult(BaseModel):
     skipped_sections: list[dict] = Field(default_factory=list)
     remaining_budget: int
     next_action: str
+    missing_or_unclear: list[dict] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list)
+

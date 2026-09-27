@@ -65,7 +65,7 @@ def build_generation_config(response_schema: dict | None = None) -> types.Genera
     }
     if response_schema is not None:
         kwargs["response_mime_type"] = "application/json"
-        kwargs["response_schema"] = response_schema
+        kwargs["response_json_schema"] = response_schema
     return types.GenerateContentConfig(**kwargs)
 
 

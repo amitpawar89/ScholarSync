@@ -343,3 +343,122 @@ def test_generation_config_uses_low_thinking_and_output_cap():
     config = build_generation_config()
     assert config.max_output_tokens == 4096
     assert config.thinking_config.thinking_level.value.lower() == "low"
+
+
+def test_generate_paper_successful_with_verified_facts(monkeypatch):
+    from backend import main as api
+
+    monkeypatch.setattr(api, "get_gemini_client", lambda: object())
+    monkeypatch.setattr(api, "extract_structured_facts", lambda *args: {
+        "project_type": None,
+        "facts": [{
+            "fact_id": "fact_0001",
+            "category": "technology",
+            "claim": "A report fact.",
+            "evidence": "A report fact.",
+            "page_number": 1,
+            "block_number": 1,
+            "status": "verified",
+        }],
+        "missing_or_unclear": [],
+    })
+    monkeypatch.setattr(api, "plan_sections", lambda facts, client: [
+        {"section_name": "Methodology", "verified_fact_ids": ["fact_0001"], "word_range": (150, 400)}
+    ])
+    monkeypatch.setattr(
+        api,
+        "generate_section",
+        lambda section_name, facts, client, min_words, max_words: "This is the generated Methodology text.",
+    )
+    monkeypatch.setattr(api, "get_remaining_request_budget", lambda: 5)
+
+    response = TestClient(api.app).post(
+        "/generate-paper",
+        files={"file": ("report.pdf", make_pdf("A report fact."), "application/pdf")},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["generated_sections"]) == 1
+    assert data["generated_sections"][0]["section_name"] == "Methodology"
+    assert data["generated_sections"][0]["content"] == "This is the generated Methodology text."
+    assert data["generated_sections"][0]["status"] == "draft_requires_review"
+    assert data["generated_sections"][0]["verified_fact_ids"] == ["fact_0001"]
+    assert data["remaining_budget"] == 5
+    assert "Review the draft sections below" in data["next_action"]
+
+
+def test_generate_paper_no_verified_facts_returns_questions(monkeypatch):
+    from backend import main as api
+
+    monkeypatch.setattr(api, "get_gemini_client", lambda: object())
+    monkeypatch.setattr(api, "extract_structured_facts", lambda *args: {
+        "project_type": None,
+        "facts": [],
+        "missing_or_unclear": [{
+            "field": "methodology",
+            "reason": "No methodology described in report.",
+            "question": "What methodology was used in this project?",
+        }],
+    })
+    monkeypatch.setattr(api, "get_remaining_request_budget", lambda: 5)
+
+    response = TestClient(api.app).post(
+        "/generate-paper",
+        files={"file": ("report.pdf", make_pdf("Unrelated content."), "application/pdf")},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["generated_sections"] == []
+    assert len(data["missing_or_unclear"]) == 1
+    assert data["missing_or_unclear"][0]["question"] == "What methodology was used in this project?"
+    assert "What methodology was used in this project?" in data["questions"]
+    assert "Provide missing information" in data["next_action"]
+
+
+def test_generate_paper_returns_503_without_key(monkeypatch):
+    from backend import main as api
+    from backend.gemini import GeminiConfigurationError
+
+    monkeypatch.setattr(api, "get_gemini_client", lambda: (_ for _ in ()).throw(GeminiConfigurationError("missing")))
+    response = TestClient(api.app).post(
+        "/generate-paper",
+        files={"file": ("report.pdf", make_pdf(), "application/pdf")},
+    )
+    assert response.status_code == 503
+
+
+def test_generate_paper_stops_at_budget_limit(monkeypatch):
+    from backend import main as api
+
+    monkeypatch.setattr(api, "get_gemini_client", lambda: object())
+    monkeypatch.setattr(api, "extract_structured_facts", lambda *args: {
+        "project_type": None,
+        "facts": [{
+            "fact_id": "fact_0001",
+            "category": "technology",
+            "claim": "A report fact.",
+            "evidence": "A report fact.",
+            "page_number": 1,
+            "block_number": 1,
+            "status": "verified",
+        }],
+        "missing_or_unclear": [],
+    })
+    monkeypatch.setattr(api, "plan_sections", lambda facts, client: [
+        {"section_name": "Section One", "verified_fact_ids": ["fact_0001"], "word_range": (150, 400)},
+        {"section_name": "Section Two", "verified_fact_ids": ["fact_0001"], "word_range": (150, 400)},
+    ])
+    # Budget is 0 before generation starts
+    monkeypatch.setattr(api, "get_remaining_request_budget", lambda: 0)
+
+    response = TestClient(api.app).post(
+        "/generate-paper",
+        files={"file": ("report.pdf", make_pdf("A report fact."), "application/pdf")},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["generated_sections"] == []
+    assert len(data["skipped_sections"]) == 2
+    assert data["skipped_sections"][0]["reason"] == "Local Gemini request budget is exhausted."
+
+
