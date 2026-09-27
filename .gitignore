@@ -1,0 +1,47 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python cache and tooling files
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE and operating-system files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Generated outputs and temporary files
+outputs/*
+!outputs/.gitkeep
+*.tmp
+*.temp
+
+# Student reports and potentially sensitive input documents
+*.pdf
+*.doc
+*.docx
+*.tex
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Stale root-level duplicate; maintained source is under backend/
+/extract_facts.py
