@@ -1,6 +1,7 @@
 import json
 
-from backend.paper_sections import call_gemini_with_retry
+from .gemini import GeminiServiceError, build_generation_config, call_gemini_with_retry
+from .schemas import SectionPlanList
 
 
 def plan_sections(facts, client):
@@ -25,7 +26,12 @@ facts dictionary), "word_range" ([min_words, max_words]), and
 "writing_instructions" (one sentence describing what the section should cover).
 """
 
-    response = call_gemini_with_retry(client, "gemini-3.8-flash", prompt)
+    response = call_gemini_with_retry(
+        client,
+        "gemini-3.8-flash",
+        prompt,
+        config=build_generation_config(SectionPlanList.model_json_schema()),
+    )
     if response is None:
         return _default_overview(facts)
 
@@ -38,11 +44,15 @@ facts dictionary), "word_range" ([min_words, max_words]), and
         response_text = response_text[:-3]
 
     try:
-        planned_sections = json.loads(response_text.strip())
-        if not isinstance(planned_sections, list):
-            raise ValueError("Section plan must be a list")
-        return planned_sections
-    except (json.JSONDecodeError, ValueError):
+        parsed = json.loads(response_text.strip())
+        if isinstance(parsed, list):
+            parsed = {"sections": parsed}
+        result = SectionPlanList.model_validate(parsed)
+        allowed_fields = set(facts)
+        if any(field not in allowed_fields for section in result.sections for field in section.facts_fields_to_use):
+            raise ValueError("Section plan references an unknown fact field")
+        return [section.model_dump() for section in result.sections]
+    except (json.JSONDecodeError, ValueError, TypeError, GeminiServiceError):
         return _default_overview(facts)
 
 

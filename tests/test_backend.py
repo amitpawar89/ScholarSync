@@ -1,0 +1,202 @@
+import io
+import importlib
+import json
+import sys
+from types import SimpleNamespace
+
+import pymupdf
+from fastapi.testclient import TestClient
+
+from backend import main
+from backend.gemini import get_gemini_client
+from backend.schemas import StructuredFactsResponse
+from backend.section_planner import plan_sections
+from backend.structured_facts import validate_structured_facts
+
+
+def make_pdf(text="A report fact."):
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), text)
+    data = document.tobytes()
+    document.close()
+    return data
+
+
+def test_health_works_without_api_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    get_gemini_client.cache_clear()
+    response = TestClient(main.app).get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_ai_endpoint_returns_503_without_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    get_gemini_client.cache_clear()
+    response = TestClient(main.app).post(
+        "/structured-facts",
+        files={"file": ("report.pdf", make_pdf(), "application/pdf")},
+    )
+    assert response.status_code == 503
+
+
+def test_renamed_non_pdf_is_rejected():
+    response = TestClient(main.app).post(
+        "/extract-text",
+        files={"file": ("report.pdf", b"not a pdf", "application/pdf")},
+    )
+    assert response.status_code == 400
+
+
+def test_malformed_pdf_is_rejected():
+    response = TestClient(main.app).post(
+        "/extract-text",
+        files={"file": ("report.pdf", b"%PDF-1.7\ninvalid", "application/pdf")},
+    )
+    assert response.status_code == 400
+
+
+def test_empty_pdf_is_rejected():
+    document = pymupdf.open()
+    document.new_page()
+    data = document.tobytes()
+    document.close()
+    response = TestClient(main.app).post(
+        "/extract-text",
+        files={"file": ("report.pdf", data, "application/pdf")},
+    )
+    assert response.status_code == 400
+
+
+def test_oversized_upload_is_rejected(monkeypatch):
+    small_limits = SimpleNamespace(max_upload_bytes=10, max_pages=100, max_text_chars=1000000)
+    monkeypatch.setattr(main, "settings", small_limits)
+    response = TestClient(main.app).post(
+        "/extract-text",
+        files={"file": ("report.pdf", make_pdf("long report"), "application/pdf")},
+    )
+    assert response.status_code == 413
+
+
+def test_matching_evidence_becomes_verified():
+    pages = [{"page_number": 2, "blocks": [{"page_number": 2, "block_number": 1, "text": "PostgreSQL is used."}]}]
+    result = StructuredFactsResponse.model_validate({
+        "project_type": "software",
+        "facts": [{
+            "category": "technology",
+            "claim": "PostgreSQL is used.",
+            "evidence": "PostgreSQL is used.",
+            "page_number": 2,
+            "block_number": 1,
+            "status": "unverified",
+        }],
+        "missing_or_unclear": [],
+    })
+    checked = validate_structured_facts(result, pages)
+    assert checked.facts[0].status == "verified"
+
+
+def test_mismatched_evidence_is_not_verified():
+    pages = [{"page_number": 2, "blocks": [{"page_number": 2, "block_number": 1, "text": "Actual evidence."}]}]
+    result = StructuredFactsResponse.model_validate({
+        "project_type": "software",
+        "facts": [{
+            "category": "claim",
+            "claim": "Unsupported claim",
+            "evidence": "Missing evidence",
+            "page_number": 2,
+            "block_number": 1,
+            "status": "verified",
+        }],
+        "missing_or_unclear": [],
+    })
+    checked = validate_structured_facts(result, pages)
+    assert checked.facts == []
+    assert checked.missing_or_unclear[0].field == "unverified_fact"
+
+
+def test_invalid_structured_json_is_safe(monkeypatch):
+    from backend import structured_facts
+
+    monkeypatch.setattr(structured_facts, "call_gemini_with_retry", lambda *args, **kwargs: SimpleNamespace(text="not json"))
+    result = structured_facts.extract_structured_facts([], object())
+    assert result["error"] == "invalid structured facts response"
+
+
+def test_invalid_section_plan_falls_back(monkeypatch):
+    import backend.section_planner as planner
+
+    monkeypatch.setattr(planner, "call_gemini_with_retry", lambda *args, **kwargs: SimpleNamespace(text='[{"section_name":"x"}]'))
+    result = plan_sections({"problem_statement": "known"}, object())
+    assert result[0]["section_name"] == "Overview"
+    assert result[0]["facts_fields_to_use"] == ["problem_statement"]
+
+
+def test_abstract_cli_writes_file(monkeypatch, tmp_path):
+    module = importlib.import_module("backend.generate_abstract")
+    facts_path = tmp_path / "facts.json"
+    facts_path.write_text(json.dumps({"problem_statement": "known"}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(module, "get_gemini_client", lambda: object())
+    monkeypatch.setattr(module, "generate_abstract", lambda facts, client: "An abstract.")
+    monkeypatch.setattr(sys, "argv", ["generate_abstract", str(facts_path)])
+    module.main()
+    assert (tmp_path / "outputs" / "abstract_facts.txt").read_text(encoding="utf-8").strip() == "An abstract."
+
+
+def test_backend_modules_import_without_running_cli(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    get_gemini_client.cache_clear()
+    for name in ("backend.extract_facts", "backend.extract_structured_facts", "backend.generate_paper", "backend.generate_abstract"):
+        sys.modules.pop(name, None)
+        importlib.import_module(name)
+
+
+def test_gemini_retries_only_transient_errors(monkeypatch):
+    import backend.gemini as gemini
+
+    sleeps = []
+    monkeypatch.setattr(gemini.time, "sleep", sleeps.append)
+    gemini._daily_request_count = 0
+    gemini._budget_date = gemini.date.today()
+
+    class Models:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_content(self, **kwargs):
+            self.calls += 1
+            raise RuntimeError("503 UNAVAILABLE")
+
+    client = SimpleNamespace(models=Models())
+    with __import__("pytest").raises(gemini.GeminiServiceError, match="Gemini is busy"):
+        gemini.call_gemini_with_retry(client, "model", "prompt")
+    assert client.models.calls == 3
+    assert len(sleeps) == 2
+
+    sleeps.clear()
+    client = SimpleNamespace(models=SimpleNamespace(generate_content=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("401 UNAUTHENTICATED"))))
+    with __import__("pytest").raises(gemini.GeminiServiceError):
+        gemini.call_gemini_with_retry(client, "model", "prompt")
+    assert sleeps == []
+
+
+def test_gemini_daily_limit_is_enforced(monkeypatch):
+    import backend.gemini as gemini
+
+    monkeypatch.setattr(gemini, "settings", SimpleNamespace(gemini_daily_request_limit=1))
+    gemini._daily_request_count = 0
+    gemini._budget_date = gemini.date.today()
+    client = SimpleNamespace(models=SimpleNamespace(generate_content=lambda **kwargs: "ok"))
+    assert gemini.call_gemini_with_retry(client, "model", "prompt") == "ok"
+    with __import__("pytest").raises(gemini.GeminiDailyLimitError):
+        gemini.call_gemini_with_retry(client, "model", "prompt")
+
+
+def test_generation_config_uses_low_thinking_and_output_cap():
+    from backend.gemini import build_generation_config
+
+    config = build_generation_config()
+    assert config.max_output_tokens == 4096
+    assert config.thinking_config.thinking_level.value.lower() == "low"

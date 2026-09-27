@@ -1,10 +1,13 @@
 from pathlib import Path
-import shutil
+import asyncio
 import tempfile
+import shutil
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
-from .extract_text import extract_report_content
+from .config import settings
+from .extract_text import PdfExtractionError, extract_report_content
+from .gemini import GeminiConfigurationError, get_gemini_client
 from .structured_facts import extract_structured_facts
 
 
@@ -16,49 +19,62 @@ def health_check():
 	return {"status": "ok"}
 
 
-@app.post("/extract-text")
-def extract_text_from_upload(file: UploadFile = File(...)):
-	if not file.filename or Path(file.filename).suffix.lower() != ".pdf":
-		raise HTTPException(status_code=400, detail="Please upload a PDF file.")
-
+async def _save_pdf(file: UploadFile) -> str:
+	if not file.filename:
+		raise HTTPException(status_code=400, detail="A PDF file is required.")
+	temporary_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+	temporary_path = temporary_file.name
+	temporary_file.close()
 	try:
-		with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temporary_file:
-			shutil.copyfileobj(file.file, temporary_file)
-			temporary_path = temporary_file.name
-
-		pages = extract_report_content(temporary_path)
-		return {"pages": pages, "page_count": len(pages)}
+		if await file.read(5) != b"%PDF-":
+			raise HTTPException(status_code=400, detail="The uploaded file is not a PDF.")
+		await file.seek(0)
+		total = 0
+		while chunk := await file.read(1024 * 1024):
+			total += len(chunk)
+			if total > settings.max_upload_bytes:
+				raise HTTPException(status_code=413, detail="The uploaded PDF exceeds the size limit.")
+			with open(temporary_path, "ab") as output_file:
+				output_file.write(chunk)
+		return temporary_path
+	except Exception:
+		Path(temporary_path).unlink(missing_ok=True)
+		raise
 	finally:
-		if "temporary_path" in locals():
+		await file.close()
+
+
+@app.post("/extract-text")
+async def extract_text_from_upload(file: UploadFile = File(...)):
+	try:
+		temporary_path = await _save_pdf(file)
+		try:
+			pages = extract_report_content(temporary_path)
+			return {"pages": pages, "page_count": len(pages)}
+		finally:
 			Path(temporary_path).unlink(missing_ok=True)
+	except PdfExtractionError as error:
+		raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.post("/structured-facts")
-def extract_structured_facts_from_upload(file: UploadFile = File(...)):
-	if not file.filename or Path(file.filename).suffix.lower() != ".pdf":
-		raise HTTPException(status_code=400, detail="Please upload a PDF file.")
-
+async def extract_structured_facts_from_upload(file: UploadFile = File(...)):
 	try:
-		with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temporary_file:
-			shutil.copyfileobj(file.file, temporary_file)
-			temporary_path = temporary_file.name
-
-		report_pages = extract_report_content(temporary_path)
-		structured_facts = extract_structured_facts(report_pages, _get_gemini_client())
-		return {
-			"page_count": len(report_pages),
-			"structured_facts": structured_facts,
-		}
-	finally:
-		if "temporary_path" in locals():
+		temporary_path = await _save_pdf(file)
+		try:
+			report_pages = extract_report_content(temporary_path)
+			try:
+				gemini_client = get_gemini_client()
+			except GeminiConfigurationError as error:
+				raise HTTPException(status_code=503, detail="Gemini is not configured.") from error
+			result = await asyncio.to_thread(extract_structured_facts, report_pages, gemini_client)
+			if "error" in result:
+				raise HTTPException(status_code=503, detail=result["error"])
+			return {"page_count": len(report_pages), "structured_facts": result}
+		finally:
 			Path(temporary_path).unlink(missing_ok=True)
-
-
-def _get_gemini_client():
-	"""Load the shared Gemini client only when the structured endpoint is used."""
-	from .paper_sections import client
-
-	return client
+	except PdfExtractionError as error:
+		raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 if __name__ == "__main__":
