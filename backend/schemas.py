@@ -54,3 +54,18 @@ class SectionPlanList(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sections: list[SectionPlan] = Field(max_length=50)
+
+
+class GeneratedPaperSection(BaseModel):
+    section_name: str
+    verified_fact_ids: list[str]
+    content: str
+    status: Literal["draft_requires_review"] = "draft_requires_review"
+
+
+class PaperGenerationResult(BaseModel):
+    status: Literal["draft_requires_review"] = "draft_requires_review"
+    generated_sections: list[GeneratedPaperSection] = Field(default_factory=list)
+    skipped_sections: list[dict] = Field(default_factory=list)
+    remaining_budget: int
+    next_action: str

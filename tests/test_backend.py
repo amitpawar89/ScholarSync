@@ -204,12 +204,76 @@ def test_structured_endpoint_rejects_large_ai_input_before_client(monkeypatch):
     assert response.status_code == 413
 
 
+def test_valid_mocked_structured_response_returns_verified_fact(monkeypatch):
+    from backend import main as api
+
+    monkeypatch.setattr(api, "get_gemini_client", lambda: object())
+    monkeypatch.setattr(api, "extract_structured_facts", lambda *args: {
+        "project_type": None,
+        "facts": [{
+            "fact_id": "fact_0001",
+            "category": "technology",
+            "claim": "A report fact.",
+            "evidence": "A report fact.",
+            "page_number": 1,
+            "block_number": 1,
+            "status": "verified",
+        }],
+        "missing_or_unclear": [],
+    })
+    response = TestClient(api.app).post("/structured-facts", files={"file": ("report.pdf", make_pdf("A report fact."), "application/pdf")})
+    assert response.status_code == 200
+    assert response.json()["structured_facts"]["facts"][0]["status"] == "verified"
+
+
+def test_truncated_structured_response_is_safe(monkeypatch):
+    import backend.structured_facts as structured
+
+    candidate = SimpleNamespace(finish_reason="MAX_TOKENS")
+    response = SimpleNamespace(candidates=[candidate], text="")
+    monkeypatch.setattr(structured, "call_gemini_with_retry", lambda *args, **kwargs: response)
+    result = structured.extract_structured_facts([], object())
+    assert "smaller report" in result["error"]
+
+
 def test_structured_input_limit_prevents_gemini_call(monkeypatch):
     import backend.structured_facts as structured
     monkeypatch.setattr(structured, "settings", SimpleNamespace(structured_max_text_chars=5, max_structured_facts=100))
     client = SimpleNamespace(models=SimpleNamespace(generate_content=lambda **kwargs: (_ for _ in ()).throw(AssertionError("called"))))
     result = structured.extract_structured_facts([{"blocks": [{"page_number": 1, "block_number": 1, "text": "too long"}]}], client)
     assert "smaller report" in result["error"]
+
+
+def test_paper_generation_stops_at_local_budget(monkeypatch):
+    import backend.generate_paper as paper
+
+    facts = {"facts": [
+        {"fact_id": "fact_0001", "status": "verified", "claim": "one"},
+        {"fact_id": "fact_0002", "status": "verified", "claim": "two"},
+    ]}
+    plan = [
+        {"section_name": "Alpha", "verified_fact_ids": ["fact_0001"], "word_range": (20, 40)},
+        {"section_name": "Beta", "verified_fact_ids": ["fact_0002"], "word_range": (20, 40)},
+    ]
+    monkeypatch.setattr(paper, "plan_sections", lambda facts, client: plan)
+    monkeypatch.setattr(paper, "get_remaining_request_budget", lambda: 0)
+    result = paper.generate_paper(facts, object())
+    assert result.generated_sections == []
+    assert [item["section_name"] for item in result.skipped_sections] == ["Alpha", "Beta"]
+    assert result.status == "draft_requires_review"
+
+
+def test_generated_section_is_review_draft_and_keeps_fact_ids(monkeypatch):
+    import backend.generate_paper as paper
+
+    facts = {"facts": [{"fact_id": "fact_0001", "status": "verified", "claim": "one"}]}
+    monkeypatch.setattr(paper, "plan_sections", lambda facts, client: [{"section_name": "Report-Specific Analysis", "verified_fact_ids": ["fact_0001"], "word_range": (20, 40)}])
+    monkeypatch.setattr(paper, "get_remaining_request_budget", lambda: 1)
+    monkeypatch.setattr(paper, "generate_section", lambda *args: "Draft prose")
+    result = paper.generate_paper(facts, object())
+    section = result.generated_sections[0]
+    assert section.status == "draft_requires_review"
+    assert section.verified_fact_ids == ["fact_0001"]
 
 
 def test_abstract_cli_writes_file(monkeypatch, tmp_path):

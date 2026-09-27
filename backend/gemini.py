@@ -28,6 +28,14 @@ class GeminiPermanentError(RuntimeError):
     """Raised for authentication, invalid-request, model, or policy failures."""
 
 
+def get_remaining_request_budget() -> int:
+    """Return the remaining per-process courtesy budget for Gemini attempts."""
+    with _budget_lock:
+        if date.today() != _budget_date:
+            return settings.gemini_daily_request_limit
+        return max(0, settings.gemini_daily_request_limit - _daily_request_count)
+
+
 @lru_cache(maxsize=1)
 def get_gemini_client() -> genai.Client:
     """Create Gemini only when first needed, and cache that client."""
@@ -63,7 +71,8 @@ def build_generation_config(response_schema: dict | None = None) -> types.Genera
 
 def _retry_delay(error: Exception, attempt: int) -> float | None:
     message = str(error).upper()
-    status = str(getattr(error, "status_code", ""))
+    status = str(getattr(error, "status_code", "") or getattr(error, "code", ""))
+    status = status.split(".")[-1]
     if status in {"400", "401", "403", "404", "422"} or any(token in message for token in ("INVALID_ARGUMENT", "UNAUTHENTICATED", "PERMISSION_DENIED", "NOT_FOUND", "SAFETY")):
         return None
     if "429" in message or "RESOURCE_EXHAUSTED" in message or status == "429":

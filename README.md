@@ -59,6 +59,14 @@ server-generated IDs can be selected by the planner or passed to section writing
 If no verified facts support a section, it is omitted and the saved fact response's
 missing-information questions are shown instead.
 
+Paper generation saves partial results safely. Each generated section is marked
+`draft_requires_review` and includes the verified fact IDs used to create it;
+generated prose is never presented as verified or final. The result also records
+`generated_sections`, `skipped_sections`, `remaining_budget`, and `next_action`.
+The local daily request counter is a per-process courtesy limit: it resets when
+the server restarts and does not replace Gemini provider quotas. A provider
+free-tier quota may still be exhausted, in which case waiting for its reset is
+expected.
 ## Tests
 
 ```powershell
