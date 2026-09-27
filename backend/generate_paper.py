@@ -18,12 +18,19 @@ def main():
 
     client = get_gemini_client()
     paper_sections = {}
-    for section in plan_sections(facts, client):
-        relevant_facts = {field: facts.get(field) for field in section["facts_fields_to_use"]}
+    verified_by_id = {
+        fact["fact_id"]: fact
+        for fact in facts.get("facts", [])
+        if fact.get("status") == "verified" and fact.get("fact_id")
+    }
+    planned_sections = plan_sections(facts, client)
+    for section in planned_sections:
+        relevant_facts = [verified_by_id[fact_id] for fact_id in section["verified_fact_ids"] if fact_id in verified_by_id]
+        if not relevant_facts:
+            continue
         min_words, max_words = section["word_range"]
         content = generate_section(
             section["section_name"],
-            section["writing_instructions"],
             relevant_facts,
             client,
             min_words,
@@ -31,6 +38,9 @@ def main():
         )
         paper_sections[section["section_name"]] = content
         print(f"\n{section['section_name']}\n{content}")
+
+    for item in facts.get("missing_or_unclear", []):
+        print(f"Missing information: {item['question']}")
 
     facts_name = os.path.splitext(os.path.basename(facts_path))[0]
     output_path = os.path.join("outputs", f"paper_{facts_name}.json")

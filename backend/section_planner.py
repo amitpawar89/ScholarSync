@@ -1,71 +1,60 @@
 import json
+from typing import Any
 
-from .gemini import GeminiServiceError, build_generation_config, call_gemini_with_retry
-from .schemas import SectionPlanList
+from pydantic import ValidationError
+
+from .gemini import GeminiDailyLimitError, GeminiPermanentError, GeminiServiceError, build_generation_config, call_gemini_with_retry
+from .schemas import SectionPlan, SectionPlanList
 
 
-def plan_sections(facts, client):
-    # Ask Gemini to select only sections supported by the complete facts dictionary.
+def _fallback() -> list[dict]:
+    return []
+
+
+def _parse_plan(response: Any, verified_fact_ids: set[str]) -> list[dict]:
+    parsed = getattr(response, "parsed", None)
+    if isinstance(parsed, SectionPlanList):
+        plan = parsed
+    elif isinstance(parsed, dict):
+        plan = SectionPlanList.model_validate(parsed)
+    else:
+        plan = SectionPlanList.model_validate(json.loads(getattr(response, "text", "")))
+
+    validated = []
+    for item in plan.sections:
+        if not item.verified_fact_ids:
+            continue
+        if any(fact_id not in verified_fact_ids for fact_id in item.verified_fact_ids):
+            continue
+        validated.append(item.model_dump())
+    return validated
+
+
+def plan_sections(facts: dict, client: Any) -> list[dict]:
+    verified_facts = [fact for fact in facts.get("facts", []) if fact.get("status") == "verified" and fact.get("fact_id")]
+    verified_fact_ids = {fact["fact_id"] for fact in verified_facts}
+    if not verified_facts:
+        return _fallback()
+
     prompt = f"""
-Based on ONLY the information present in these facts, decide which standard
-research-paper sections can be meaningfully written. Consider standard sections
-like Introduction, Methodology/Proposed System, Results, Discussion, Conclusion
-— but only include a section if there is enough factual information to support it.
-If the facts suggest a section beyond these standard ones is relevant (for example,
-'Ethical Considerations' if the facts mention data privacy, or 'System Architecture'
-if there is strong technical detail), you may include it.
+Use ONLY the verified report facts below to propose research-paper sections.
+Section titles must be determined by the report and may be any appropriate title.
+Do not force standard sections. Do not include a section without enough verified
+facts. Each section must reference only verified_fact_ids shown below.
 
-Facts:
-{json.dumps(facts, indent=2)}
+Return exactly this structured JSON object and no other keys:
+{{"sections": [{{"section_name": "...", "verified_fact_ids": ["fact_0001"], "word_range": [150, 400]}}]}}
 
-Do not include a section if there isn't enough factual basis for it.
-
-Return only a JSON list of objects. Each object must contain exactly these keys:
-"section_name" (string), "facts_fields_to_use" (list of field names from the
-facts dictionary), "word_range" ([min_words, max_words]), and
-"writing_instructions" (one sentence describing what the section should cover).
+Do not write prose or instructions. Word ranges must be between 20 and 2000.
+<VERIFIED_FACTS>
+{json.dumps(verified_facts, indent=2)}
+</VERIFIED_FACTS>
 """
-
-    response = call_gemini_with_retry(
-        client,
-        "gemini-3.8-flash",
-        prompt,
-        config=build_generation_config(SectionPlanList.model_json_schema()),
-    )
-    if response is None:
-        return _default_overview(facts)
-
-    response_text = response.text.strip()
-    if response_text.startswith("```json"):
-        response_text = response_text[7:]
-    elif response_text.startswith("```"):
-        response_text = response_text[3:]
-    if response_text.endswith("```"):
-        response_text = response_text[:-3]
-
     try:
-        parsed = json.loads(response_text.strip())
-        if isinstance(parsed, list):
-            parsed = {"sections": parsed}
-        result = SectionPlanList.model_validate(parsed)
-        allowed_fields = set(facts)
-        if any(field not in allowed_fields for section in result.sections for field in section.facts_fields_to_use):
-            raise ValueError("Section plan references an unknown fact field")
-        return [section.model_dump() for section in result.sections]
-    except (json.JSONDecodeError, ValueError, TypeError, GeminiServiceError):
-        return _default_overview(facts)
-
-
-def _default_overview(facts):
-    # Preserve every non-null fact in one safe fallback section.
-    non_null_facts = {
-        field: value
-        for field, value in facts.items()
-        if value is not None and value != "" and value != [] and value != {}
-    }
-    return [{
-        "section_name": "Overview",
-        "facts_fields_to_use": list(non_null_facts),
-        "word_range": [150, 400],
-        "writing_instructions": "Summarize the report using the available factual information.",
-    }]
+        response = call_gemini_with_retry(
+            client, "gemini-3.8-flash", prompt,
+            config=build_generation_config(SectionPlanList.model_json_schema()),
+        )
+        return _parse_plan(response, verified_fact_ids)
+    except (GeminiDailyLimitError, GeminiPermanentError, GeminiServiceError, ValidationError, json.JSONDecodeError, TypeError, ValueError):
+        return _fallback()

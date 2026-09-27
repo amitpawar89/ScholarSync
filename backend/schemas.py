@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class StructuredFact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    fact_id: str | None = Field(default=None, max_length=80)
     category: str = Field(min_length=1, max_length=100)
     claim: str = Field(min_length=1, max_length=2000)
     evidence: str = Field(min_length=1, max_length=4000)
@@ -26,7 +27,10 @@ class StructuredFactsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_type: str | None = Field(default=None, max_length=200)
-    facts: list[StructuredFact] = Field(default_factory=list, max_length=5000)
+    project_type_evidence: str | None = Field(default=None, max_length=4000)
+    project_type_page_number: int | None = Field(default=None, ge=1)
+    project_type_block_number: int | None = Field(default=None, ge=1)
+    facts: list[StructuredFact] = Field(default_factory=list, max_length=100)
     missing_or_unclear: list[MissingOrUnclear] = Field(default_factory=list, max_length=500)
 
 
@@ -34,9 +38,8 @@ class SectionPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     section_name: str = Field(min_length=1, max_length=100)
-    facts_fields_to_use: list[str] = Field(min_length=1, max_length=50)
+    verified_fact_ids: list[str] = Field(default_factory=list, max_length=100)
     word_range: tuple[int, int]
-    writing_instructions: str = Field(min_length=1, max_length=500)
 
     @field_validator("word_range")
     @classmethod

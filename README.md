@@ -36,7 +36,10 @@ Open `http://127.0.0.1:8000/docs` for the interactive API documentation.
 ## Limits and errors
 
 Defaults are 20 MiB per upload, 100 pages, and 1,000,000 extracted characters.
-Override them with the `SCHOLARSYNC_*` variables in `.env`. Uploads must have a
+Structured-facts AI input is separately limited to 200,000 characters by
+`SCHOLARSYNC_STRUCTURED_MAX_TEXT_CHARS`, and structured output is capped at 100
+facts by `SCHOLARSYNC_MAX_STRUCTURED_FACTS`. Override these and other limits with
+the `SCHOLARSYNC_*` variables in `.env`. Uploads must have a
 valid `%PDF-` signature and contain extractable text. Malformed, encrypted,
 empty, oversized, and unsupported PDFs return safe `4xx` responses. Missing
 Gemini configuration returns `503` from AI-dependent endpoints. The service
@@ -50,6 +53,11 @@ are retried a maximum of three times with bounded exponential backoff. Invalid
 requests and authentication failures are not retried. Free-tier quota can still
 be exhausted; waiting for the provider quota reset is expected and no billing
 or paid-plan setup is required.
+
+Paper section titles are report-driven. Only facts marked `verified` and carrying
+server-generated IDs can be selected by the planner or passed to section writing.
+If no verified facts support a section, it is omitted and the saved fact response's
+missing-information questions are shown instead.
 
 ## Tests
 

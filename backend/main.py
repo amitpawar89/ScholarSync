@@ -7,7 +7,13 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 
 from .config import settings
 from .extract_text import PdfExtractionError, extract_report_content
-from .gemini import GeminiConfigurationError, get_gemini_client
+from .gemini import (
+	GeminiConfigurationError,
+	GeminiDailyLimitError,
+	GeminiPermanentError,
+	GeminiServiceError,
+	get_gemini_client,
+)
 from .structured_facts import extract_structured_facts
 
 
@@ -63,13 +69,23 @@ async def extract_structured_facts_from_upload(file: UploadFile = File(...)):
 		temporary_path = await _save_pdf(file)
 		try:
 			report_pages = extract_report_content(temporary_path)
+			if sum(len(page["text"]) for page in report_pages) > settings.structured_max_text_chars:
+				raise HTTPException(status_code=413, detail="This report is too large for free-tier structured extraction. Please upload a smaller report.")
 			try:
 				gemini_client = get_gemini_client()
 			except GeminiConfigurationError as error:
 				raise HTTPException(status_code=503, detail="Gemini is not configured.") from error
-			result = await asyncio.to_thread(extract_structured_facts, report_pages, gemini_client)
+			try:
+				result = await asyncio.to_thread(extract_structured_facts, report_pages, gemini_client)
+			except GeminiDailyLimitError as error:
+				raise HTTPException(status_code=429, detail="The local free-tier Gemini request limit has been reached. Please try again later.") from error
+			except GeminiServiceError as error:
+				raise HTTPException(status_code=503, detail="Gemini is busy, please try again later.") from error
+			except GeminiPermanentError as error:
+				raise HTTPException(status_code=502, detail="Gemini rejected the request. Check the server configuration or report format.") from error
 			if "error" in result:
-				raise HTTPException(status_code=503, detail=result["error"])
+				status = 413 if "too large" in result["error"].lower() or "smaller report" in result["error"].lower() else 502
+				raise HTTPException(status_code=status, detail=result["error"])
 			return {"page_count": len(report_pages), "structured_facts": result}
 		finally:
 			Path(temporary_path).unlink(missing_ok=True)
